@@ -1,0 +1,32 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "apps", "apps", "{1787FE1D-075E-9E68-7218-25F1BD1BBEAB}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "hello-world-api", "hello-world-api", "{040DFB25-6504-247E-85C6-E21DB35DA990}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HelloWorldApi", "apps\hello-world-api\src\HelloWorldApi.csproj", "{4C52F900-4EED-4961-5E0C-F303DD31879E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{4C52F900-4EED-4961-5E0C-F303DD31879E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4C52F900-4EED-4961-5E0C-F303DD31879E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4C52F900-4EED-4961-5E0C-F303DD31879E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4C52F900-4EED-4961-5E0C-F303DD31879E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{040DFB25-6504-247E-85C6-E21DB35DA990} = {1787FE1D-075E-9E68-7218-25F1BD1BBEAB}
+		{4C52F900-4EED-4961-5E0C-F303DD31879E} = {040DFB25-6504-247E-85C6-E21DB35DA990}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B920C553-B05C-4AA1-B2B7-77613C71EDC3}
+	EndGlobalSection
+EndGlobal
