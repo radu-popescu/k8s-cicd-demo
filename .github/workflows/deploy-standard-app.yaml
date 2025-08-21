@@ -208,7 +208,7 @@ jobs:
   deploy:
     needs: [validate-manifests, security-scan, scan-container-image]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
     
     steps:
