@@ -208,7 +208,7 @@ jobs:
   deploy:
     needs: [validate-manifests, security-scan, scan-container-image]
     runs-on: ubuntu-latest
-    # if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     environment: production
     
     steps:
@@ -272,10 +272,11 @@ jobs:
         "
 
     - name: Upload deployment manifests
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: deployment-manifests-${{ env.APP_NAME }}-${{ github.sha }}
         path: deployments/standard-apps/${{ env.APP_NAME }}/final-manifests.yaml
+        retention-days: 30
 
     - name: Show deployment instructions
       run: |
