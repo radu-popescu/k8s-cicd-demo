@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: nginx-demo
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+        
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+        
+        access_log  /var/log/nginx/access.log  main;
+        sendfile        on;
+        keepalive_timeout  65;
+        
+        server {
+            listen       80;
+            server_name  localhost;
+            
+            location / {
+                root   /usr/share/nginx/html;
+                index  index.html index.htm;
+            }
+            
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+        }
+    }
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Nginx CI/CD Demo</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            .container { max-width: 600px; margin: 0 auto; text-align: center; }
+            .status { color: #28a745; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Nginx Deployment Success!</h1>
+            <p class="status">This nginx pod was deployed through CI/CD pipeline</p>
+            <p>Deployment timestamp: <span id="timestamp"></span></p>
+            <hr>
+            <p>Pipeline: Standard App Workflow</p>
+            <p>Environment: Kubernetes</p>
+        </div>
+        <script>
+            document.getElementById('timestamp').textContent = new Date().toISOString();
+        </script>
+    </body>
+    </html>
