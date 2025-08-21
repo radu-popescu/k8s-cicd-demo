@@ -1,0 +1,197 @@
+name: Deploy Standard App (Pre-built Images)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+    - 'deployments/standard-apps/**'
+    - '.github/workflows/deploy-standard-app.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+    - 'deployments/standard-apps/**'
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Standard app to deploy'
+        required: true
+        default: 'nginx'
+        type: choice
+        options:
+        - nginx
+
+env:
+  APP_NAME: ${{ github.event.inputs.app_name || 'nginx' }}
+
+jobs:
+  # Stage 1: Validation and Testing
+  validate-manifests:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Setup Kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+
+    - name: Validate Kubernetes manifests
+      run: |
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        echo "=== Validating Kubernetes manifests ==="
+        kustomize build . | kubectl apply --dry-run=client -f -
+        echo "✅ Manifests validation passed"
+
+    - name: Lint Kubernetes manifests
+      run: |
+        # Install kubeval for additional validation
+        wget https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz
+        tar xf kubeval-linux-amd64.tar.gz
+        sudo mv kubeval /usr/local/bin
+        
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        echo "=== Linting Kubernetes manifests ==="
+        kustomize build . | kubeval
+        echo "✅ Manifests linting passed"
+
+  # Stage 2: Security and Policy Validation
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+
+    - name: Security scan with Polaris
+      run: |
+        # Install Polaris for Kubernetes best practices validation
+        wget https://github.com/FairwindsOps/polaris/releases/latest/download/polaris_linux_amd64.tar.gz
+        tar -xzf polaris_linux_amd64.tar.gz
+        sudo mv polaris /usr/local/bin/
+        
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        echo "=== Security scanning with Polaris ==="
+        kustomize build . | polaris audit --format=pretty --only-show-failed-tests=false
+        echo "✅ Security scan completed"
+
+    - name: Check resource limits and requests
+      run: |
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        echo "=== Checking resource configuration ==="
+        if kustomize build . | grep -q "resources:"; then
+          echo "✅ Resource limits/requests are configured"
+          kustomize build . | grep -A 10 "resources:"
+        else
+          echo "⚠️  Warning: No resource limits/requests found"
+          exit 1
+        fi
+
+  # Stage 3: Image Security Scan
+  scan-container-image:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+
+    - name: Extract container images
+      id: extract-images
+      run: |
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        echo "=== Extracting container images ==="
+        IMAGES=$(kustomize build . | grep -E "^\s+image:" | awk '{print $2}' | sort -u)
+        echo "images<<EOF" >> $GITHUB_OUTPUT
+        echo "$IMAGES" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        echo "Found images: $IMAGES"
+
+    - name: Scan container images with Trivy
+      run: |
+        echo "=== Scanning container images ==="
+        echo "${{ steps.extract-images.outputs.images }}" | while read -r image; do
+          if [ -n "$image" ]; then
+            echo "Scanning image: $image"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              -v ${{ github.workspace }}:/workspace \
+              aquasec/trivy:latest image --exit-code 0 --severity HIGH,CRITICAL "$image"
+          fi
+        done
+
+  # Stage 4: Deploy to Kubernetes
+  deploy:
+    needs: [validate-manifests, security-scan, scan-container-image]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Setup Kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+
+    # For local testing with kind (uncomment for remote cluster)
+    # - name: Configure kubectl for remote cluster
+    #   run: |
+    #     echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
+    #     export KUBECONFIG=kubeconfig
+
+    - name: Add deployment timestamp
+      run: |
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        # Add timestamp label to deployment
+        kustomize edit add label deployment-timestamp:$(date +%s)
+        kustomize edit add label github-sha:${{ github.sha }}
+        kustomize edit add label github-run-id:${{ github.run_id }}
+
+    - name: Generate final manifests
+      run: |
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        echo "=== Final Kubernetes Manifests ==="
+        kustomize build . | tee final-manifests.yaml
+
+    - name: Upload deployment manifests
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-manifests-${{ env.APP_NAME }}
+        path: deployments/standard-apps/${{ env.APP_NAME }}/final-manifests.yaml
+
+    # Uncomment for actual deployment
+    # - name: Deploy to Kubernetes
+    #   run: |
+    #     cd deployments/standard-apps/${{ env.APP_NAME }}
+    #     echo "=== Deploying to Kubernetes ==="
+    #     kustomize build . | kubectl apply -f -
+    #     
+    #     # Wait for deployment to be ready
+    #     kubectl rollout status deployment/${{ env.APP_NAME }}-demo -n ${{ env.APP_NAME }}-demo --timeout=300s
+    #     
+    #     echo "=== Deployment Status ==="
+    #     kubectl get pods -n ${{ env.APP_NAME }}-demo
+    #     kubectl get services -n ${{ env.APP_NAME }}-demo
+
+    - name: Show deployment summary
+      run: |
+        echo "=== Deployment Summary ==="
+        echo "App: ${{ env.APP_NAME }}"
+        echo "SHA: ${{ github.sha }}"
+        echo "Timestamp: $(date)"
+        echo "Manifests are ready for deployment!"

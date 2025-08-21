@@ -1,0 +1,192 @@
+name: Deploy Custom App (Containerized)
+
+on:
+  push:
+    branches: [ main ]
+    paths: 
+    - 'apps/hello-world-api/**'
+    - 'deployments/custom-apps/**'
+    - '.github/workflows/deploy-custom-app.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+    - 'apps/hello-world-api/**'
+    - 'deployments/custom-apps/**'
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'App to deploy'
+        required: true
+        default: 'hello-world-api'
+        type: choice
+        options:
+        - hello-world-api
+
+env:
+  REGISTRY: docker.io
+  APP_NAME: ${{ github.event.inputs.app_name || 'hello-world-api' }}
+
+jobs:
+  # Stage 1: Code Quality & Testing
+  test-and-lint:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Cache .NET packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+
+    - name: Restore dependencies
+      run: |
+        dotnet restore apps/${{ env.APP_NAME }}/src/*.csproj
+        dotnet restore apps/${{ env.APP_NAME }}/tests/*.csproj
+
+    - name: Build application
+      run: dotnet build apps/${{ env.APP_NAME }}/src/*.csproj --no-restore --configuration Release
+
+    - name: Run unit tests
+      run: dotnet test apps/${{ env.APP_NAME }}/tests/*.csproj --no-restore --verbosity normal --logger trx --results-directory TestResults
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: TestResults/
+
+  # Stage 2: Security Scanning
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: './apps/${{ env.APP_NAME }}'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Stage 3: Build and Push Container
+  build-and-push:
+    needs: [test-and-lint, security-scan]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: ./apps/${{ env.APP_NAME }}
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+
+    - name: Generate SBOM
+      uses: anchore/sbom-action@v0
+      with:
+        image: ${{ env.REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}:${{ github.sha }}
+        format: spdx-json
+        output-file: sbom.spdx.json
+
+    - name: Upload SBOM
+      uses: actions/upload-artifact@v3
+      with:
+        name: sbom
+        path: sbom.spdx.json
+
+  # Stage 4: Deploy to Kubernetes
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+
+    - name: Setup Kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+
+    # For local testing with kind (uncomment for remote cluster)
+    # - name: Configure kubectl for remote cluster
+    #   run: |
+    #     echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
+    #     export KUBECONFIG=kubeconfig
+
+    - name: Update image in Kustomization
+      run: |
+        cd deployments/custom-apps/${{ env.APP_NAME }}
+        kustomize edit set image ${{ env.APP_NAME }}=${{ env.REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}:main-${{ github.sha }}
+
+    - name: Validate Kubernetes manifests
+      run: |
+        cd deployments/custom-apps/${{ env.APP_NAME }}
+        kustomize build . | kubectl apply --dry-run=client -f -
+
+    # Uncomment for actual deployment
+    # - name: Deploy to Kubernetes
+    #   run: |
+    #     cd deployments/custom-apps/${{ env.APP_NAME }}
+    #     kustomize build . | kubectl apply -f -
+    #     kubectl rollout status deployment/${{ env.APP_NAME }} -n ${{ env.APP_NAME }} --timeout=300s
+
+    - name: Show deployment files (for demonstration)
+      run: |
+        echo "=== Generated Kubernetes Manifests ==="
+        cd deployments/custom-apps/${{ env.APP_NAME }}
+        kustomize build .
