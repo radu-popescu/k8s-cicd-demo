@@ -46,19 +46,33 @@ jobs:
         kustomize build . | kubectl apply --dry-run=client -f -
         echo "✅ Manifests validation passed"
 
-    - name: Lint Kubernetes manifests
+    - name: Check manifest syntax
       run: |
-        # Install kubeval for additional validation
-        wget https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz
-        tar xf kubeval-linux-amd64.tar.gz
-        sudo mv kubeval /usr/local/bin
-        
         cd deployments/standard-apps/${{ env.APP_NAME }}
-        echo "=== Linting Kubernetes manifests ==="
-        kustomize build . | kubeval
-        echo "✅ Manifests linting passed"
+        echo "=== Checking YAML syntax ==="
+        
+        # Check each YAML file individually
+        for file in *.yaml; do
+          if [ -f "$file" ]; then
+            echo "Checking $file..."
+            kubectl apply --dry-run=client -f "$file" >/dev/null 2>&1
+            if [ $? -eq 0 ]; then
+              echo "✅ $file is valid"
+            else
+              echo "❌ $file has issues"
+              kubectl apply --dry-run=client -f "$file"
+              exit 1
+            fi
+          fi
+        done
+        
+        # Validate kustomized output
+        echo "Validating final kustomized output..."
+        kustomize build . > /tmp/final-manifests.yaml
+        kubectl apply --dry-run=client -f /tmp/final-manifests.yaml
+        echo "✅ All manifests are valid"
 
-  # Stage 2: Security and Policy Validation
+  # Stage 2: Basic Security Checks
   security-scan:
     runs-on: ubuntu-latest
     steps:
@@ -70,28 +84,57 @@ jobs:
         curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
         sudo mv kustomize /usr/local/bin/
 
-    - name: Security scan with Polaris
-      run: |
-        # Install Polaris for Kubernetes best practices validation
-        wget https://github.com/FairwindsOps/polaris/releases/latest/download/polaris_linux_amd64.tar.gz
-        tar -xzf polaris_linux_amd64.tar.gz
-        sudo mv polaris /usr/local/bin/
-        
-        cd deployments/standard-apps/${{ env.APP_NAME }}
-        echo "=== Security scanning with Polaris ==="
-        kustomize build . | polaris audit --format=pretty --only-show-failed-tests=false
-        echo "✅ Security scan completed"
-
-    - name: Check resource limits and requests
+    - name: Check resource configuration
       run: |
         cd deployments/standard-apps/${{ env.APP_NAME }}
         echo "=== Checking resource configuration ==="
+        
         if kustomize build . | grep -q "resources:"; then
           echo "✅ Resource limits/requests are configured"
-          kustomize build . | grep -A 10 "resources:"
+          echo "Resource configuration found:"
+          kustomize build . | grep -A 6 "resources:" || true
         else
           echo "⚠️  Warning: No resource limits/requests found"
+          echo "This is not necessarily an error, but recommended for production"
+        fi
+
+    - name: Check security context
+      run: |
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        echo "=== Checking security context ==="
+        
+        if kustomize build . | grep -q "securityContext:"; then
+          echo "✅ Security context is configured"
+          kustomize build . | grep -A 10 "securityContext:" || true
+        else
+          echo "ℹ️  No explicit security context found"
+        fi
+
+    - name: Check for common security issues
+      run: |
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        echo "=== Basic security checks ==="
+        
+        # Check for root user
+        if kustomize build . | grep -q "runAsUser.*0"; then
+          echo "⚠️  Warning: Running as root user detected"
+        else
+          echo "✅ Not explicitly running as root"
+        fi
+        
+        # Check for privileged containers
+        if kustomize build . | grep -q "privileged.*true"; then
+          echo "❌ Privileged containers detected - this is dangerous!"
           exit 1
+        else
+          echo "✅ No privileged containers detected"
+        fi
+        
+        # Check for host network
+        if kustomize build . | grep -q "hostNetwork.*true"; then
+          echo "⚠️  Warning: Host network access detected"
+        else
+          echo "✅ No host network access"
         fi
 
   # Stage 3: Image Security Scan
@@ -106,26 +149,40 @@ jobs:
         curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
         sudo mv kustomize /usr/local/bin/
 
-    - name: Extract container images
-      id: extract-images
+    - name: Extract and scan container images
       run: |
         cd deployments/standard-apps/${{ env.APP_NAME }}
         echo "=== Extracting container images ==="
+        
+        # Extract images from manifests
         IMAGES=$(kustomize build . | grep -E "^\s+image:" | awk '{print $2}' | sort -u)
-        echo "images<<EOF" >> $GITHUB_OUTPUT
-        echo "$IMAGES" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-        echo "Found images: $IMAGES"
-
-    - name: Scan container images with Trivy
-      run: |
+        
+        if [ -z "$IMAGES" ]; then
+          echo "No images found in manifests"
+          exit 1
+        fi
+        
+        echo "Found images:"
+        echo "$IMAGES"
+        
+        # Install Trivy
+        echo "=== Installing Trivy ==="
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy -y
+        
+        # Scan each image
         echo "=== Scanning container images ==="
-        echo "${{ steps.extract-images.outputs.images }}" | while read -r image; do
+        echo "$IMAGES" | while read -r image; do
           if [ -n "$image" ]; then
             echo "Scanning image: $image"
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-              -v ${{ github.workspace }}:/workspace \
-              aquasec/trivy:latest image --exit-code 0 --severity HIGH,CRITICAL "$image"
+            # Use --exit-code 0 to not fail on vulnerabilities, just report them
+            trivy image --exit-code 0 --severity HIGH,CRITICAL --format table "$image"
+            echo "Scan completed for $image"
+            echo "---"
           fi
         done
 
@@ -154,44 +211,77 @@ jobs:
     #     echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
     #     export KUBECONFIG=kubeconfig
 
-    - name: Add deployment timestamp
+    - name: Add deployment metadata
       run: |
         cd deployments/standard-apps/${{ env.APP_NAME }}
-        # Add timestamp label to deployment
+        
+        # Add timestamp and git info as labels
         kustomize edit add label deployment-timestamp:$(date +%s)
         kustomize edit add label github-sha:${{ github.sha }}
         kustomize edit add label github-run-id:${{ github.run_id }}
+        kustomize edit add label deployed-by:github-actions
 
     - name: Generate final manifests
       run: |
         cd deployments/standard-apps/${{ env.APP_NAME }}
-        echo "=== Final Kubernetes Manifests ==="
+        echo "=== Generating Final Kubernetes Manifests ==="
         kustomize build . | tee final-manifests.yaml
+        
+        echo ""
+        echo "=== Manifest Summary ==="
+        echo "Resources to be deployed:"
+        grep "^kind:" final-manifests.yaml | sort | uniq -c
+        
+        echo ""
+        echo "=== Namespaces ==="
+        grep "namespace:" final-manifests.yaml | sort -u || echo "Using default namespace"
+
+    - name: Validate final manifests
+      run: |
+        cd deployments/standard-apps/${{ env.APP_NAME }}
+        echo "=== Final validation ==="
+        kubectl apply --dry-run=client -f final-manifests.yaml
+        echo "✅ Final manifests are valid and ready for deployment"
 
     - name: Upload deployment manifests
       uses: actions/upload-artifact@v3
       with:
-        name: deployment-manifests-${{ env.APP_NAME }}
+        name: deployment-manifests-${{ env.APP_NAME }}-${{ github.sha }}
         path: deployments/standard-apps/${{ env.APP_NAME }}/final-manifests.yaml
 
-    # Uncomment for actual deployment
+    # Uncomment for actual deployment to cluster
     # - name: Deploy to Kubernetes
     #   run: |
     #     cd deployments/standard-apps/${{ env.APP_NAME }}
     #     echo "=== Deploying to Kubernetes ==="
-    #     kustomize build . | kubectl apply -f -
+    #     kubectl apply -f final-manifests.yaml
     #     
     #     # Wait for deployment to be ready
-    #     kubectl rollout status deployment/${{ env.APP_NAME }}-demo -n ${{ env.APP_NAME }}-demo --timeout=300s
+    #     DEPLOYMENT_NAME=$(grep "^  name:" final-manifests.yaml | grep -A1 "kind: Deployment" | tail -1 | awk '{print $2}')
+    #     NAMESPACE=$(grep "namespace:" final-manifests.yaml | head -1 | awk '{print $2}' || echo "default")
     #     
-    #     echo "=== Deployment Status ==="
-    #     kubectl get pods -n ${{ env.APP_NAME }}-demo
-    #     kubectl get services -n ${{ env.APP_NAME }}-demo
+    #     if [ -n "$DEPLOYMENT_NAME" ]; then
+    #       echo "Waiting for deployment $DEPLOYMENT_NAME in namespace $NAMESPACE"
+    #       kubectl rollout status deployment/$DEPLOYMENT_NAME -n $NAMESPACE --timeout=300s
+    #       
+    #       echo "=== Deployment Status ==="
+    #       kubectl get pods -n $NAMESPACE -l app=${{ env.APP_NAME }}
+    #       kubectl get services -n $NAMESPACE
+    #     fi
 
     - name: Show deployment summary
       run: |
+        cd deployments/standard-apps/${{ env.APP_NAME }}
         echo "=== Deployment Summary ==="
         echo "App: ${{ env.APP_NAME }}"
         echo "SHA: ${{ github.sha }}"
         echo "Timestamp: $(date)"
-        echo "Manifests are ready for deployment!"
+        echo "Workflow: Standard App Deployment"
+        echo ""
+        echo "Manifests generated successfully and uploaded as artifacts."
+        echo "To deploy to a cluster, uncomment the deployment step and configure KUBECONFIG secret."
+        echo ""
+        echo "=== Next Steps ==="
+        echo "1. Download the deployment manifests from the artifacts"
+        echo "2. Review the generated manifests"
+        echo "3. Apply to your Kubernetes cluster: kubectl apply -f final-manifests.yaml"

@@ -9,7 +9,10 @@ resources:
 
 namespace: nginx-demo
 
-commonLabels:
-  managed-by: kustomize
-  project: nginx-demo
-  deployment-type: standard-app
+# Use labels instead of commonLabels (deprecated)
+labels:
+- pairs:
+    managed-by: kustomize
+    project: nginx-demo
+    deployment-type: standard-app
+  includeSelectors: false
